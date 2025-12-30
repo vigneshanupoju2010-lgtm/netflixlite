@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Netflix Lite</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="container">
+      <h1 class="logo">Netflix <span class="lite">Lite</span></h1>
+      <p class="tag">Pick 3 movies you like — we’ll suggest 5 more</p>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="controls">
+      <div class="inputs">
+        <input id="m1" class="movie-input" placeholder="Movie 1 (e.g. Iron Man (2008))" />
+        <input id="m2" class="movie-input" placeholder="Movie 2 (e.g. The Avengers (2012))" />
+        <input id="m3" class="movie-input" placeholder="Movie 3 (optional)" />
+        <button id="go" class="btn">Recommend</button>
+      </div>
+      <div id="status" class="status"></div>
+    </section>
+
+    <section>
+     <h2 class="section-title" style="display:flex; align-items:center; gap:12px;">
+  Recommendations
+  <span id="status" aria-live="polite" style="display:flex; align-items:center; gap:8px;">
+    <span id="status-spinner" class="status-spinner" aria-hidden="true" style="display:none"></span>
+    <span id="status-text"></span>
+  </span>
+</h2>
+
+
+      <div id="results" class="grid" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      <small>Built with MovieLens • Item-Item CF • scikit-learn</small>
+    </div>
+  </footer>
+
+<script>
+async function loadTitles() {
+  try {
+    const res = await fetch('/titles');
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.titles || [];
+  } catch (e) {
+    console.error('Failed to load titles:', e);
+    return [];
+  }
+}
+
+function debounce(fn, wait=250){
+  let t;
+  return (...args)=>{ clearTimeout(t); t = setTimeout(()=>fn(...args), wait); };
+}
+
+// Create suggestion container under an input
+function attachAutocomplete(inputEl, titles) {
+  inputEl.setAttribute('autocomplete', 'off');
+
+  // create dropdown element
+  const box = document.createElement('div');
+  box.className = 'autocomplete-box';
+  box.style.position = 'absolute';
+  box.style.zIndex = 9999;
+  box.style.display = 'none';
+  box.style.maxHeight = '220px';
+  box.style.overflow = 'auto';
+  box.style.background = 'white';
+  box.style.border = '1px solid #ddd';
+  box.style.borderRadius = '6px';
+  box.style.boxShadow = '0 6px 18px rgba(0,0,0,0.08)';
+  box.style.width = inputEl.offsetWidth + 'px';
+  document.body.appendChild(box);
+
+  // position function
+  function positionBox(){
+    const rect = inputEl.getBoundingClientRect();
+    box.style.left = rect.left + 'px';
+    box.style.top = (rect.bottom + window.scrollY + 6) + 'px';
+    box.style.width = rect.width + 'px';
+  }
+
+  window.addEventListener('resize', positionBox);
+  window.addEventListener('scroll', positionBox, true);
+
+  let filtered = [];
+  let highlighted = -1;
+
+  function renderList(list){
+    box.innerHTML = '';
+    highlighted = -1;
+    if (!list.length){ box.style.display = 'none'; return; }
+    list.slice(0, 10).forEach((title, i)=>{
+      const r = document.createElement('div');
+      r.className = 'autocomplete-item';
+      r.textContent = title;
+      r.style.padding = '8px 10px';
+      r.style.cursor = 'pointer';
+      r.style.fontSize = '14px';
+      if (i % 2 === 1) r.style.background = '#fff';
+      r.addEventListener('mousedown', (ev)=>{
+        ev.preventDefault(); // prevent input blur before click
+        inputEl.value = title;
+        box.style.display = 'none';
+      });
+      box.appendChild(r);
+    });
+    box.style.display = 'block';
+    positionBox();
+  }
+
+  function moveHighlight(delta){
+    const items = box.querySelectorAll('.autocomplete-item');
+    if (!items.length) return;
+    highlighted = Math.max(0, Math.min(items.length-1, highlighted + delta));
+    items.forEach((it, idx)=> {
+      it.style.background = (idx === highlighted) ? '#f2f6ff' : '';
+    });
+    // scroll into view
+    const cur = items[highlighted];
+    if (cur) cur.scrollIntoView({block:'nearest'});
+  }
+
+  // filter function (debounced)
+  const doFilter = debounce(function(){
+    const q = inputEl.value.trim().toLowerCase();
+    if (!q){ renderList([]); return; }
+    filtered = titles.filter(t => t.toLowerCase().includes(q));
+    renderList(filtered);
+  }, 150);
+
+  inputEl.addEventListener('input', ()=>{ doFilter(); });
+
+  // keyboard nav
+  inputEl.addEventListener('keydown', (e)=>{
+    const KEY = e.key;
+    const items = box.querySelectorAll('.autocomplete-item');
+    if (KEY === 'ArrowDown') { e.preventDefault(); moveHighlight(1); }
+    else if (KEY === 'ArrowUp') { e.preventDefault(); moveHighlight(-1); }
+    else if (KEY === 'Enter') {
+      if (box.style.display === 'block' && highlighted >= 0) {
+        e.preventDefault();
+        const items = box.querySelectorAll('.autocomplete-item');
+        const chosen = items[highlighted].textContent;
+        inputEl.value = chosen;
+        box.style.display = 'none';
+      }
+    } else if (KEY === 'Escape') {
+      box.style.display = 'none';
+    }
+  });
+
+  // hide when clicking outside
+  document.addEventListener('mousedown', (ev)=>{
+    if (ev.target !== inputEl && !box.contains(ev.target)) {
+      box.style.display = 'none';
+    }
+  });
+
+  // reposition on focus
+  inputEl.addEventListener('focus', ()=>{ positionBox(); if (inputEl.value) doFilter(); });
+}
+
+// --- Attach autocomplete to 3 inputs when page loads -----------------------
+(async function initAutocomplete(){
+  const titles = await loadTitles();
+  // if very large dataset you could reduce it here (e.g., titles.slice(0,20000))
+  attachAutocomplete(document.getElementById('m1'), titles);
+  attachAutocomplete(document.getElementById('m2'), titles);
+  attachAutocomplete(document.getElementById('m3'), titles);
+})();
+</script>
+
+<script>
+async function getRec() {
+  // status elements
+  const statusWrapper = document.getElementById('status');          // wrapper that gets class names
+  const statusSpinner = document.getElementById('status-spinner');  // spinner element
+  const statusText = document.getElementById('status-text');        // text element
+
+  // show spinner + message
+  if (statusWrapper) statusWrapper.className = 'status-loading';
+  if (statusSpinner) statusSpinner.style.display = 'inline-block';
+  if (statusText) statusText.textContent = 'Searching...';
+
+  // gather titles
+  let titles = Array.from(document.querySelectorAll('.movie-input'))
+                    .map(i => i.value && i.value.trim())
+                    .filter(Boolean);
+
+  // fallback to ids if class not present
+  if (!titles.length) {
+    titles = [
+      document.getElementById('m1')?.value?.trim(),
+      document.getElementById('m2')?.value?.trim(),
+      document.getElementById('m3')?.value?.trim()
+    ].filter(Boolean);
+  }
+
+  // no input -> show warning and hide spinner
+  if (!titles.length) {
+    if (statusText) statusText.textContent = 'Please enter at least one movie';
+    if (statusWrapper) statusWrapper.className = 'status-warn';
+    if (statusSpinner) statusSpinner.style.display = 'none';
+    return;
+  }
+
+  try {
+    const resp = await fetch('/recommend', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ titles })
+    });
+
+    if (!resp.ok) {
+      throw new Error('Server returned ' + resp.status);
+    }
+
+    const data = await resp.json();
+    const recs = data.recommendations || [];
+
+    const results = document.getElementById('results');
+    results.innerHTML = '';
+
+    if (!recs.length) {
+      if (statusText) statusText.textContent = 'No results found';
+      if (statusWrapper) statusWrapper.className = 'status-warn';
+      return;
+    }
+
+    // success
+    if (statusText) statusText.textContent = `Found ${recs.length} recommendations`;
+    if (statusWrapper) statusWrapper.className = 'status-ok';
+    
+    // render cards (with clickable modal)
+recs.forEach(r => {
+  const card = document.createElement('div');
+  card.className = 'card';
+  // safe movie id (may be null if backend didn't return it)
+  const mid = r.movieId || r.movie_id || r.id || null;
+  card.setAttribute('data-movieid', mid);
+  card.style.cursor = 'pointer';
+  card.innerHTML = `
+    <img src="${r.poster || '/static/placeholder.png'}" class="poster" onerror="this.src='/static/placeholder.png'">
+    <div class="meta">
+      <div class="title">${r.title}</div>
+      <div class="score">${(r.score || '').toString().length ? (Math.round((r.score||0)*100)/100) : ''}</div>
+    </div>
+  `;
+  card.addEventListener('click', () => {
+    if (mid) openMovieModal(mid);
+    else alert('Details not available for this item');
+  });
+  results.appendChild(card);
+});
+
+
+  } catch (err) {
+    console.error('getRec error', err);
+    if (statusText) statusText.textContent = 'Error fetching results';
+    if (statusWrapper) statusWrapper.className = 'status-error';
+  } finally {
+    // hide spinner always when finished
+    if (statusSpinner) statusSpinner.style.display = 'none';
+  }
+}
+
+// bind the button (safe binding)
+const goBtn = document.getElementById('go');
+if (goBtn) goBtn.onclick = getRec;
+</script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  // find modal elements (safe)
+  const modal = document.getElementById('movie-modal');
+  if (!modal) return console.warn('Modal element #movie-modal not found. Did you paste the modal HTML before </body>?');
+
+  const modalInner = modal.querySelector('.modal-inner') || modal.querySelector('.modal-inner') || modal.querySelector('.modal-inner');
+  const modalOverlay = document.getElementById('modal-overlay') || modal.querySelector('.modal-overlay');
+  const modalCloseBtn = document.getElementById('modal-close') || modal.querySelector('.modal-close');
+
+  // required content nodes (use fallbacks)
+  const titleEl = document.getElementById('modal-title');
+  const overviewEl = document.getElementById('modal-overview');
+  const genresEl = document.getElementById('modal-genres');
+  const metaEl = document.getElementById('modal-meta');
+  const posterImg = document.getElementById('modal-poster-img') || document.getElementById('modal-poster');
+  const trailerDiv = document.getElementById('modal-trailer') || document.getElementById('modal-trailer-container');
+
+  // quick checks
+  if (!modalInner) console.warn('modalInner (.modal-inner) not found inside #movie-modal');
+  if (!modalOverlay) console.warn('#modal-overlay (or .modal-overlay) not found');
+  if (!modalCloseBtn) console.warn('#modal-close (or .modal-close) not found');
+  if (!titleEl) console.warn('#modal-title missing');
+  if (!posterImg) console.warn('poster image element missing: expected #modal-poster-img or #modal-poster');
+
+  function closeModal() {
+    // hide modal safely
+    try {
+      if (modalInner) modalInner.style.display = 'none';
+      modal.setAttribute('aria-hidden', 'true');
+      modal.style.display = 'none';
+    } catch (e) { /* ignore */ }
+    if (trailerDiv) trailerDiv.innerHTML = '';
+    document.removeEventListener('keydown', escClose);
+  }
+
+  function escClose(e) {
+    if (e.key === 'Escape') closeModal();
+  }
+  if (modalOverlay) modalOverlay.addEventListener('click', closeModal);
+  if (modalCloseBtn) modalCloseBtn.addEventListener('click', closeModal);
+  window.openMovieModal = async function(movieId) {
+    if (!movieId) {
+      alert('Movie id missing');
+      return;
+    }
+
+    try {
+      modal.style.display = 'flex';
+      modal.setAttribute('aria-hidden', 'false');
+      if (modalInner) modalInner.style.display = 'block';
+    } catch (e) { console.warn('Failed to show modal UI', e); }
+
+    
+    if (titleEl) titleEl.textContent = 'Loading...';
+    if (overviewEl) overviewEl.textContent = '';
+    if (genresEl) genresEl.textContent = '';
+    if (metaEl) metaEl.textContent = '';
+    if (posterImg) posterImg.src = '/static/placeholder.png';
+    if (trailerDiv) trailerDiv.innerHTML = '';
+
+    try {
+      const resp = await fetch(`/movie/${movieId}`);
+      if (!resp.ok) throw new Error('Server returned ' + resp.status);
+      const data = await resp.json();
+
+      if (titleEl) titleEl.textContent = data.title || 'No title';
+      if (overviewEl) overviewEl.textContent = data.overview || '';
+      if (genresEl) genresEl.textContent = (data.genres && data.genres.length) ? data.genres.join(', ') : '';
+      if (metaEl) metaEl.textContent = `Release: ${data.release_date || 'N/A'} • TMDb: ${data.tmdb_rating || 'N/A'}`;
+      if (posterImg) posterImg.src = data.poster || '/static/placeholder.png';
+
+      
+      if (trailerDiv) {
+        trailerDiv.innerHTML = '';
+        if (data.youtube_key) {
+          const iframe = document.createElement('iframe');
+          iframe.width = '100%';
+          iframe.height = '360';
+          iframe.src = `https://www.youtube.com/embed/${data.youtube_key}`;
+          iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture';
+          iframe.setAttribute('allowfullscreen', '');
+          trailerDiv.appendChild(iframe);
+        } else {
+          trailerDiv.innerHTML = '<p style="color:#ddd">No trailer available.</p>';
+        }
+      }
+
+      document.addEventListener('keydown', escClose);
+
+    } catch (err) {
+      console.error('openMovieModal error', err);
+      if (titleEl) titleEl.textContent = 'Unable to load details';
+      if (overviewEl) overviewEl.textContent = '';
+    }
+  };
+  console.log('Modal initialized. call openMovieModal(movieId) to open it.');
+}); 
+</script>
+
+
+<div id="movie-modal" class="modal" aria-hidden="true" style="display:none;">
+  <div class="modal-overlay" id="modal-overlay"></div>
+  <div class="modal-inner" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <button id="modal-close" class="modal-close" aria-label="Close">✕</button>
+    <div class="modal-grid">
+      <div class="modal-poster">
+        <img id="modal-poster-img" src="/static/placeholder.png" alt="poster">
+      </div>
+      <div class="modal-info">
+        <h2 id="modal-title">Title</h2>
+        <div id="modal-meta" class="meta-row"></div>
+        <p id="modal-overview"></p>
+        <div id="modal-genres" class="meta-row"></div>
+        <div id="modal-extra" class="meta-row"></div>
+        <div id="modal-trailer" style="margin-top:12px;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
